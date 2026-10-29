@@ -1,9 +1,13 @@
-"""Automatically label a video and export detections as CVAT video tracks."""
+"""Extract frames from a video based on frame-step, detect objects,
+and export both frames and annotations as a CVAT Images 1.1 ZIP dataset.
+"""
 
 from __future__ import annotations
 
 import argparse
 import cv2
+import io
+import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -13,7 +17,7 @@ from ultralytics import YOLO
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Detect objects in a video inside an ROI and export CVAT XML."
+        description="Extract frames, detect objects inside ROI, and export CVAT Images ZIP dataset."
     )
     parser.add_argument("video", type=Path, help="Input video path")
     parser.add_argument(
@@ -24,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("cvat_annotations.xml"),
-        help="CVAT XML output path",
+        default=Path("cvat_dataset.zip"),
+        help="CVAT ZIP output path (default: cvat_dataset.zip)",
     )
     parser.add_argument(
         "--roi",
@@ -48,8 +52,8 @@ def parse_args() -> argparse.Namespace:
         "--stride",
         dest="frame_step",
         type=int,
-        default=1,
-        help="Process one frame every N frames (default: 1)",
+        default=30,
+        help="Process one frame every N frames (default: 30)",
     )
     parser.add_argument(
         "--classes",
@@ -57,11 +61,6 @@ def parse_args() -> argparse.Namespace:
         help="Only keep these class names, for example: --classes person car",
     )
     parser.add_argument("--device", default=None, help="Inference device, e.g. cpu or 0")
-    parser.add_argument(
-        "--preview",
-        type=Path,
-        help="Optional path for a video preview with boxes and the ROI",
-    )
     return parser.parse_args()
 
 
@@ -93,53 +92,6 @@ def box_is_in_roi(
     return max(x1, roi_x) < min(x2, roi_x2) and max(y1, roi_y) < min(y2, roi_y2)
 
 
-def add_box(track: ET.Element, frame_number: int, box: tuple[float, ...]) -> None:
-    x1, y1, x2, y2, confidence = box
-    ET.SubElement(
-        track,
-        "box",
-        {
-            "frame": str(frame_number),
-            "outside": "0",
-            "occluded": "0",
-            "keyframe": "1",
-            "xtl": f"{x1:.2f}",
-            "ytl": f"{y1:.2f}",
-            "xbr": f"{x2:.2f}",
-            "ybr": f"{y2:.2f}",
-            "conf": f"{confidence:.4f}",
-            "z_order": "0",
-        },
-    )
-
-
-def export_cvat(
-    output: Path,
-    video: Path,
-    width: int,
-    height: int,
-    fps: float,
-    frame_count: int,
-    tracks: dict[tuple[int, str], ET.Element],
-) -> None:
-    annotations = ET.Element("annotations")
-    ET.SubElement(annotations, "version").text = "1.1"
-    meta = ET.SubElement(annotations, "meta")
-    task = ET.SubElement(meta, "task")
-    ET.SubElement(task, "name").text = video.stem
-    ET.SubElement(task, "size").text = str(frame_count)
-    ET.SubElement(task, "mode").text = "interpolation"
-    original_size = ET.SubElement(task, "original_size")
-    ET.SubElement(original_size, "width").text = str(width)
-    ET.SubElement(original_size, "height").text = str(height)
-    ET.SubElement(task, "source").text = str(video)
-    ET.SubElement(task, "fps").text = f"{fps:.6f}"
-    for track in tracks.values():
-        annotations.append(track)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    ET.ElementTree(annotations).write(output, encoding="utf-8", xml_declaration=True)
-
-
 def main() -> None:
     args = parse_args()
     if args.frame_step < 1:
@@ -150,94 +102,134 @@ def main() -> None:
     capture = cv2.VideoCapture(str(args.video))
     if not capture.isOpened():
         raise RuntimeError(f"Could not open video: {args.video}")
+
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
-    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    
     ok, first_frame = capture.read()
     if not ok:
         capture.release()
         raise RuntimeError("The video has no readable frames")
-    roi = choose_roi(first_frame, args.roi)
 
+    roi = choose_roi(first_frame, args.roi)
     model = YOLO(args.model)
     allowed_classes = set(args.classes or [])
-    tracks: dict[tuple[int, str], ET.Element] = {}
-    fallback_id = 0
-    preview_writer = None
-    if args.preview:
-        codec = cv2.VideoWriter_fourcc(*"mp4v")
-        preview_writer = cv2.VideoWriter(str(args.preview), codec, fps, (width, height))
+
+    # Inicializar el árbol XML para CVAT for images 1.1
+    annotations = ET.Element("annotations")
+    ET.SubElement(annotations, "version").text = "1.1"
+    meta = ET.SubElement(annotations, "meta")
+    task = ET.SubElement(meta, "task")
+    ET.SubElement(task, "name").text = args.video.stem
+
+    used_labels: set[str] = set()
+    images_nodes: list[ET.Element] = []
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
 
     frame_number = 0
-    while True:
-        if frame_number == 0:
-            frame = first_frame
-        else:
-            ok, frame = capture.read()
-            if not ok:
-                break
-        if frame_number % args.frame_step == 0:
-            inference = model.track(
-                frame,
-                persist=True,
-                conf=args.conf,
-                iou=args.iou,
-                imgsz=args.imgsz,
-                device=args.device,
-                verbose=False,
-            )[0]
-            names = inference.names
-            boxes = inference.boxes
-            ids = boxes.id.int().tolist() if boxes.id is not None else [None] * len(boxes)
-            for box_tensor, confidence_tensor, class_tensor, track_id in zip(
-                boxes.xyxy.tolist(),
-                boxes.conf.tolist(),
-                boxes.cls.int().tolist(),
-                ids,
-            ):
-                label = str(names[class_tensor])
-                box = tuple(float(value) for value in box_tensor)
-                if allowed_classes and label not in allowed_classes:
-                    continue
-                if not box_is_in_roi(box, roi, args.roi_mode):
-                    continue
-                if track_id is None:
-                    fallback_id += 1
-                    track_id = fallback_id
-                track_key = (int(track_id), label)
-                track = tracks.get(track_key)
-                if track is None:
-                    track = ET.Element(
-                        "track", {"id": str(track_key[0]), "label": label, "source": "auto"}
-                    )
-                    tracks[track_key] = track
-                confidence = float(confidence_tensor)
-                add_box(track, frame_number, (*box, confidence))
+    extracted_count = 0
 
-                if preview_writer is not None:
-                    x1, y1, x2, y2 = (int(value) for value in box)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 0), 2)
-                    cv2.putText(
-                        frame,
-                        f"{label} {confidence:.2f}",
-                        (x1, max(20, y1 - 5)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (0, 220, 0),
-                        2,
-                    )
-        if preview_writer is not None:
-            x, y, roi_width, roi_height = roi
-            cv2.rectangle(frame, (x, y), (x + roi_width, y + roi_height), (255, 180, 0), 2)
-            preview_writer.write(frame)
-        frame_number += 1
+    print("Procesando video y creando ZIP...")
+    with zipfile.ZipFile(args.output, "w", zipfile.ZIP_DEFLATED) as zipf:
+        while True:
+            if frame_number == 0:
+                frame = first_frame
+                ok = True
+            else:
+                ok, frame = capture.read()
+                if not ok:
+                    break
 
-    capture.release()
-    if preview_writer is not None:
-        preview_writer.release()
-    export_cvat(args.output, args.video, width, height, fps, frame_count, tracks)
-    print(f"Exported {len(tracks)} tracks to {args.output}")
+            if frame_number % args.frame_step == 0:
+                image_name = f"frame_{frame_number:06d}.jpg"
+                
+                # Inferencia con Ultralytics
+                results = model.predict(
+                    frame,
+                    conf=args.conf,
+                    iou=args.iou,
+                    imgsz=args.imgsz,
+                    device=args.device,
+                    verbose=False,
+                )[0]
+
+                # Nodo XML para la imagen actual
+                image_node = ET.Element(
+                    "image",
+                    {
+                        "id": str(extracted_count),
+                        "name": image_name,
+                        "width": str(width),
+                        "height": str(height),
+                    },
+                )
+
+                names = results.names
+                boxes = results.boxes
+
+                for box_tensor, confidence_tensor, class_tensor in zip(
+                    boxes.xyxy.tolist(),
+                    boxes.conf.tolist(),
+                    boxes.cls.int().tolist(),
+                ):
+                    label = str(names[class_tensor])
+                    box = tuple(float(v) for v in box_tensor)
+
+                    if allowed_classes and label not in allowed_classes:
+                        continue
+                    if not box_is_in_roi(box, roi, args.roi_mode):
+                        continue
+
+                    used_labels.add(label)
+                    x1, y1, x2, y2 = box
+                    confidence = float(confidence_tensor)
+
+                    # Sub-nodo para la caja delimitadora (detección)
+                    ET.SubElement(
+                        image_node,
+                        "box",
+                        {
+                            "label": label,
+                            "source": "auto",
+                            "occluded": "0",
+                            "xtl": f"{x1:.2f}",
+                            "ytl": f"{y1:.2f}",
+                            "xbr": f"{x2:.2f}",
+                            "ybr": f"{y2:.2f}",
+                            "confidence": f"{confidence:.4f}",
+                            "z_order": "0",
+                        },
+                    )
+
+                images_nodes.append(image_node)
+
+                # Comprimir la imagen JPEG directamente dentro del ZIP en memoria
+                _, img_encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                zipf.writestr(f"images/{image_name}", img_encoded.tobytes())
+                
+                extracted_count += 1
+
+            frame_number += 1
+
+        capture.release()
+
+        # Construir la sección de etiquetas en el meta del XML
+        labels_elem = ET.SubElement(task, "labels")
+        for label_name in sorted(used_labels):
+            label_elem = ET.SubElement(labels_elem, "label")
+            ET.SubElement(label_elem, "name").text = label_name
+
+        # Adjuntar las imágenes al XML
+        for img_node in images_nodes:
+            annotations.append(img_node)
+
+        # Escribir el annotations.xml dentro del ZIP
+        xml_bytes = ET.tostring(annotations, encoding="utf-8", xml_declaration=True)
+        zipf.writestr("annotations.xml", xml_bytes)
+
+    print(f"Proceso finalizado. Se extrajeron {extracted_count} frames.")
+    print(f"Archivo listo para importar en CVAT: {args.output}")
 
 
 if __name__ == "__main__":
