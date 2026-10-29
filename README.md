@@ -1,20 +1,18 @@
 # TUIA-IET
-Proyecto de investigación de Computer Vision.
 
-## Etiquetado automatico de videos
+Proyecto de investigación de Computer Vision.  
+Etiquetado automático de videos para datasets de imágenes.
 
-`auto_label_video.py` recorre un video, permite seleccionar una region de interes
-(ROI), ejecuta deteccion y tracking con Ultralytics YOLO, y genera un XML de
-interpolacion compatible con CVAT. Las detecciones se exportan agrupadas por ID
-de ByteTrack para facilitar la correccion posterior.
+`auto_label_video.py` recorre un video, permite seleccionar una región de interés (ROI), ejecuta detección de objetos con Ultralytics YOLO aplicando un paso de fotogramas (`--frame-step`), extrae las imágenes relevantes y genera un paquete comprimido (`.zip`) listo para importar directamente en CVAT como dataset de imágenes (`CVAT 1.1 for images`).
 
-### Instalacion
+---
+
+## Instalación
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-```
 
 El modelo se descarga automaticamente la primera vez. Para usar YOLO26 XL, el
 nombre de pesos esperado es `yolo26x.pt`; tambien se puede pasar una ruta local
@@ -23,7 +21,7 @@ con `--model`.
 ### Uso interactivo
 
 ```powershell
-python auto_label_video.py .\video.mp4 --model yolo26x.pt --output .\cvat_annotations.xml
+python auto_label_video.py .\video.mp4 --model yolo26x.pt --output .\cvat_dataset.zip
 ```
 
 Se abre una ventana de OpenCV: dibuja la ROI y pulsa Enter. Para evitar la
@@ -31,12 +29,11 @@ ventana, pasa la ROI directamente en pixeles:
 
 ```powershell
 python auto_label_video.py .\video.mp4 `
-	--roi 120 80 1400 900 `
-	--classes persona auto `
-	--conf 0.35 `
-	--frame-step 5 `
-	--preview .\preview.mp4 `
-	--output .\cvat_annotations.xml
+    --roi 120 80 1400 900 `
+    --classes person car `
+    --conf 0.35 `
+    --frame-step 30 `
+    --output .\cvat_dataset.zip
 ```
 
 En CVAT, importa `cvat_annotations.xml` como anotaciones de una tarea de video.
