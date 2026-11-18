@@ -8,16 +8,28 @@ import argparse
 import cv2
 import io
 import zipfile
+import numpy as np
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
 from ultralytics import YOLO
 
+# Variable global para almacenar los puntos del polígono
+puntos_poligono = []
+
+def capturar_puntos(event, x, y, flags, param):
+    """Callback para manejar los clics del mouse en la ventana de dibujo."""
+    global puntos_poligono
+    if event == cv2.EVENT_LBUTTONDOWN:
+        puntos_poligono.append((x, y))
+    elif event == cv2.EVENT_RBUTTONDOWN:
+        if puntos_poligono:
+            puntos_poligono.pop()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract frames, detect objects inside ROI, and export CVAT Images ZIP dataset."
+        description="Extract frames, detect objects inside a polygonal ROI, and export CVAT Images ZIP dataset."
     )
     parser.add_argument("video", type=Path, help="Input video path")
     parser.add_argument(
@@ -32,19 +44,12 @@ def parse_args() -> argparse.Namespace:
         help="CVAT ZIP output path (default: cvat_dataset.zip)",
     )
     parser.add_argument(
-        "--roi",
-        nargs=4,
-        type=int,
-        metavar=("X", "Y", "WIDTH", "HEIGHT"),
-        help="ROI in pixels; if omitted, select it in a window",
-    )
-    parser.add_argument(
         "--roi-mode",
         choices=("center", "intersection"),
         default="center",
         help="How a detection is accepted by the ROI (default: center)",
     )
-    parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold")
+    parser.add_argument("--conf", type=float, default=0.15, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.7, help="NMS IoU threshold")
     parser.add_argument("--imgsz", type=int, default=1280, help="Inference image size")
     parser.add_argument(
@@ -58,38 +63,93 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--classes",
         nargs="*",
-        help="Only keep these class names, for example: --classes person car",
+        default=["car", "motorcycle", "bicycle", "person"],
+        help="Solo conserva las clases indicadas (por defecto: car, motorcycle, bicycle, person)",
     )
     parser.add_argument("--device", default=None, help="Inference device, e.g. cpu or 0")
     return parser.parse_args()
 
 
-def choose_roi(frame: Any, roi: list[int] | None) -> tuple[int, int, int, int]:
-    height, width = frame.shape[:2]
-    if roi is None:
-        selected = cv2.selectROI("Select detection ROI and press ENTER", frame, False, False)
-        cv2.destroyWindow("Select detection ROI and press ENTER")
-        roi = [int(value) for value in selected]
-    x, y, roi_width, roi_height = roi
-    if roi_width <= 0 or roi_height <= 0:
-        raise ValueError("ROI must have a positive width and height")
-    if x < 0 or y < 0 or x + roi_width > width or y + roi_height > height:
-        raise ValueError(f"ROI must fit inside the video frame ({width}x{height})")
-    return x, y, roi_width, roi_height
+def definir_roi_poligonal(frame: Any) -> np.ndarray:
+    """Abre una interfaz para trazar un polígono y devuelve sus vértices."""
+    global puntos_poligono
+    puntos_poligono.clear()
+    
+    frame_copia = frame.copy()
+    # Nombre estricto ASCII para evitar fallos en setMouseCallback
+    nombre_ventana = "Seleccionar ROI"
+    
+    # WINDOW_NORMAL permite redimensionar la ventana sin desfasar los clics
+    cv2.namedWindow(nombre_ventana, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(nombre_ventana, capturar_puntos)
+
+    while True:
+        temp_frame = frame_copia.copy()
+        
+        # Dibujar polígono en tiempo real
+        if len(puntos_poligono) > 0:
+            for pt in puntos_poligono:
+                cv2.circle(temp_frame, pt, 4, (0, 0, 255), -1)
+            for i in range(len(puntos_poligono) - 1):
+                cv2.line(temp_frame, puntos_poligono[i], puntos_poligono[i+1], (0, 255, 0), 2)
+            if len(puntos_poligono) > 2:
+                cv2.line(temp_frame, puntos_poligono[-1], puntos_poligono[0], (255, 0, 0), 2)
+
+        # Imprimir instrucciones sobre el frame en lugar del título de la ventana
+        cv2.putText(
+            temp_frame, 
+            "Click Izq: Agregar | Click Der: Borrar | ENTER o ESPACIO: Confirmar", 
+            (20, 40), 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.7, 
+            (0, 255, 255), 
+            2
+        )
+
+        cv2.imshow(nombre_ventana, temp_frame)
+        
+        # Capturar teclado (13 = ENTER, 32 = ESPACIO)
+        key = cv2.waitKey(1) & 0xFF
+        if key in [13, 32]: 
+            break
+
+    cv2.destroyWindow(nombre_ventana)
+    
+    if len(puntos_poligono) > 2:
+        return np.array(puntos_poligono, np.int32)
+    else:
+        # Si no se dibuja nada válido, asume el frame completo como ROI
+        h, w = frame.shape[:2]
+        print("No se dibujó un polígono válido. Usando todo el frame como ROI.")
+        return np.array([[0, 0], [w, 0], [w, h], [0, h]], np.int32)
 
 
-def box_is_in_roi(
+def box_is_in_polygon(
     box: tuple[float, float, float, float],
-    roi: tuple[int, int, int, int],
+    polygon: np.ndarray,
     mode: str,
 ) -> bool:
+    """Verifica si el bounding box está dentro del polígono utilizando pointPolygonTest."""
     x1, y1, x2, y2 = box
-    roi_x, roi_y, roi_width, roi_height = roi
-    roi_x2, roi_y2 = roi_x + roi_width, roi_y + roi_height
+    
     if mode == "center":
-        center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
-        return roi_x <= center_x <= roi_x2 and roi_y <= center_y <= roi_y2
-    return max(x1, roi_x) < min(x2, roi_x2) and max(y1, roi_y) < min(y2, roi_y2)
+        center_x, center_y = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        # pointPolygonTest retorna >= 0 si el punto está dentro o en el borde del polígono
+        return cv2.pointPolygonTest(polygon, (float(center_x), float(center_y)), False) >= 0
+    
+    else: # mode == "intersection"
+        # Para intersección, comprobamos si el centro o alguna de las esquinas del box cae dentro del polígono
+        puntos_a_comprobar = [
+            ((x1 + x2) / 2.0, (y1 + y2) / 2.0), # Centro
+            (x1, y1), # Esquina superior izquierda
+            (x2, y1), # Esquina superior derecha
+            (x2, y2), # Esquina inferior derecha
+            (x1, y2)  # Esquina inferior izquierda
+        ]
+        for pt_x, pt_y in puntos_a_comprobar:
+            if cv2.pointPolygonTest(polygon, (float(pt_x), float(pt_y)), False) >= 0:
+                return True
+        return False
 
 
 def main() -> None:
@@ -111,7 +171,9 @@ def main() -> None:
         capture.release()
         raise RuntimeError("The video has no readable frames")
 
-    roi = choose_roi(first_frame, args.roi)
+    # Extraer los vértices del polígono al iniciar
+    polygon_roi = definir_roi_poligonal(first_frame)
+    
     model = YOLO(args.model)
     allowed_classes = set(args.classes or [])
 
@@ -176,9 +238,11 @@ def main() -> None:
                     label = str(names[class_tensor])
                     box = tuple(float(v) for v in box_tensor)
 
-                    if allowed_classes and label not in allowed_classes:
+                    if label not in allowed_classes:
                         continue
-                    if not box_is_in_roi(box, roi, args.roi_mode):
+                        
+                    # Validar si el vehículo está dentro de la ROI Poligonal
+                    if not box_is_in_polygon(box, polygon_roi, args.roi_mode):
                         continue
 
                     used_labels.add(label)
