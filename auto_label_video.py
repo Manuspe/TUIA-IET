@@ -32,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--conf", type=float, default=0.15, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.7, help="NMS IoU threshold")
-    parser.add_argument("--imgsz", type=int, default=1280, help="Inference image size")
+    parser.add_argument("--imgsz", type=int, default=960, help="Inference image size")
     parser.add_argument(
         "--frame-step",
         "--stride",
@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
         default=["car", "motorcycle", "bicycle", "person"],
         help="Solo conserva las clases indicadas (por defecto: car, motorcycle, bicycle, person)",
     )
-    parser.add_argument("--device", default=None, help="Inference device, e.g. cpu or 0")
+    parser.add_argument("--device", default=0, help="Inference device, e.g. cpu or 0")
     return parser.parse_args()
 
 
