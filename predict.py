@@ -105,6 +105,6 @@ def predecir_video(ruta_video, ruta_pesos):
 
 if __name__ == "__main__":
     # Ruta donde se guardaron los pesos de tu modelo finalizado
-    ruta_mejor_modelo = "runs/detect/TUIA-IET_runs/yolo26l_trafico_v1/weights/best.pt"
+    ruta_mejor_modelo = "runs/detect/TUIA-IET_runs/yolo26l_trafico_v1-3/weights/best.pt"
     
     predecir_video("prueba_1.mp4", ruta_mejor_modelo)

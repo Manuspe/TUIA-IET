@@ -1,0 +1,6 @@
+{
+  "python.defaultInterpreterPath": "/home/nicolas/miniconda3/envs/IET/bin/python",
+  "python.condaPath": "/home/nicolas/miniconda3/bin/conda",
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
+}

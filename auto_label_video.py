@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("cvat_dataset.zip"),
         help="CVAT ZIP output path (default: cvat_dataset.zip)",
     )
-    parser.add_argument("--conf", type=float, default=0.15, help="Confidence threshold")
+    parser.add_argument("--conf", type=float, default=0.22, help="Confidence threshold")
     parser.add_argument("--iou", type=float, default=0.7, help="NMS IoU threshold")
     parser.add_argument("--imgsz", type=int, default=960, help="Inference image size")
     parser.add_argument(
